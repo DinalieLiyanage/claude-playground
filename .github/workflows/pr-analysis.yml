@@ -1,0 +1,63 @@
+name: PR Analysis
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+# Cancel an in-progress review when new commits are pushed to the same PR
+concurrency:
+  group: pr-analysis-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Get PR diff
+        run: gh pr diff "$PR_NUMBER" > pr.diff
+
+      - name: Review with code_reviewer
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          claude -p "Review pull request #$PR_NUMBER for security vulnerabilities and best practices.
+          The PR diff is in the file pr.diff at the repo root; the rest of the repo is checked out for context.
+          Delegate the review to the code_reviewer agent: tell it to read pr.diff and review only the code changed in this PR, reading the full changed files for context. It must not review pr.diff itself as a source file.
+          Your final response must be exactly the agent's full report, with no extra commentary before or after it." \
+            --allowedTools "Agent,Read,Grep,Glob" \
+            --max-turns 20 \
+            --output-format json \
+            > review.md
+
+          if [ ! -s review.md ]; then
+            echo "Claude returned an empty review" >&2
+            exit 1
+          fi
+
+      - name: Post review comment
+        run: |
+          {
+            echo "## 🔍 Code review (code_reviewer)"
+            echo
+            cat review.md
+          } > comment.md
+          gh pr comment "$PR_NUMBER" --body-file comment.md
